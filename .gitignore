@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+.env
+
+# Streamlit secrets (NEVER commit credentials)
+.streamlit/secrets.toml
+
+# Audio files (prevent repo bloat; stored in Supabase)
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+
+# Deep learning models & checkpoints
+*.keras
+*.h5
+*.tflite
+*.ckpt
+
+# IDE and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
