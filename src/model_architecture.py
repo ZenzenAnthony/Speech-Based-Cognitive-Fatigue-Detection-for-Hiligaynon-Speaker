@@ -6,12 +6,19 @@ Contains serializable Temporal Attention mechanism and dual Conv2D backbone
 matching the thesis specifications and Keras 3 serialization standards.
 """
 
-from typing import Tuple, Union
+from typing import Tuple
 import tensorflow as tf
 from tensorflow.keras import layers, regularizers, Model
 
+# Cross-compatible serialization decorator import
+try:
+    from tensorflow.keras.utils import register_keras_serializable
+except (ImportError, AttributeError):
+    import keras
+    register_keras_serializable = keras.saving.register_keras_serializable
 
-@tf.keras.saving.register_keras_serializable(package="CustomLayers")
+
+@register_keras_serializable(package="CustomLayers")
 class TemporalAttention(layers.Layer):
     """
     Temporal Attention mechanism applying tanh projection and Softmax normalization
@@ -49,11 +56,11 @@ class TemporalAttention(layers.Layer):
         score = tf.nn.tanh(tf.matmul(inputs, self.w) + self.b)
         energy = tf.matmul(score, self.v)
         weights = tf.nn.softmax(energy, axis=1)
-        
+
         # Weighted context pooling across temporal axis
         context_vector = tf.reduce_sum(inputs * weights, axis=1)
         weights_squeezed = tf.squeeze(weights, axis=-1)
-        
+
         return context_vector, weights_squeezed
 
     def get_config(self) -> dict:
