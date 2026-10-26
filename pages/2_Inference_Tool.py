@@ -98,15 +98,23 @@ def load_fatigue_model():
     if tf is None or not os.path.exists(MODEL_PATH):
         return None
     try:
-        custom_objects = {"TemporalAttention": TemporalAttention} if TemporalAttention else {}
-        trained_model = tf.keras.models.load_model(
+        custom_objects = {
+            "TemporalAttention": TemporalAttention,
+            "CustomLayers>TemporalAttention": TemporalAttention,
+        } if TemporalAttention else {}
+
+        loaded_model = tf.keras.models.load_model(
             MODEL_PATH,
             custom_objects=custom_objects,
             compile=False,
         )
-        if get_inference_model is None:
-            return trained_model
-        return get_inference_model(trained_model)
+
+        # If the file is already a dual-output model (fatigue_output + attention), use it directly
+        if len(loaded_model.outputs) == 2 or get_inference_model is None:
+            return loaded_model
+
+        # Otherwise, wrap a single-output training checkpoint into a dual-output inference model
+        return get_inference_model(loaded_model)
     except Exception as exc:
         st.sidebar.error(f"Model load error: {exc}")
         return None
