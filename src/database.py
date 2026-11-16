@@ -6,6 +6,7 @@ for the Hiligaynon speech-based cognitive fatigue detection study.
 """
 
 import uuid
+from urllib.parse import unquote, urlparse
 from typing import Optional
 
 import pandas as pd
@@ -79,61 +80,47 @@ def log_session(
 
 
 def fetch_all_sessions() -> pd.DataFrame:
-    """Returns logged records as a Pandas DataFrame for analysis with hardened error handling."""
-    expected_columns = [
-        "session_id",
-        "respondent_id",
-        "task_level",
-        "ground_truth_score",
-        "predicted_fatigue",
-        "audio_storage_url",
-        "created_at",
-    ]
-    try:
-        supabase = get_supabase_client()
-        response = supabase.table("fatigue_session").select("*").execute()
-        if response.data:
-            return pd.DataFrame(response.data)
-        return pd.DataFrame(columns=expected_columns)
-    except Exception as e:
-        st.warning(f"Unable to fetch database sessions: {e}")
-        return pd.DataFrame(columns=expected_columns)
+    """Returns logged records as a Pandas DataFrame for analysis."""
+    supabase = get_supabase_client()
+    response = supabase.table("fatigue_session").select("*").execute()
+    return pd.DataFrame(response.data)
 
 
-def delete_participant_data(respondent_id: str) -> bool:
-    """
-    Removes participant audio files from storage and purges database records
-    when a participant invokes withdrawal under Thesis Appendix C.
-    """
-    try:
-        supabase = get_supabase_client()
+def delete_participant_data(respondent_id: str) -> None:
+    """Delete a participant's session rows, respondent row, and stored recordings."""
+    supabase = get_supabase_client()
+    query = (
+        supabase.table("fatigue_session")
+        .select("audio_storage_url")
+        .eq("respondent_id", respondent_id)
+        .execute()
+    )
 
-        # 1. Fetch audio file URLs associated with participant
-        sessions = (
-            supabase.table("fatigue_session")
-            .select("audio_storage_url")
-            .eq("respondent_id", respondent_id)
-            .execute()
-        )
+    storage_paths = []
+    for row in query.data or []:
+        audio_url = row.get("audio_storage_url")
+        if not audio_url:
+            continue
+        path = unquote(urlparse(audio_url).path)
+        marker = "/audio-recordings/"
+        if marker in path:
+            storage_paths.append(path.split(marker, 1)[1])
 
-        # 2. Extract relative file paths and delete from storage
-        file_paths = []
-        if sessions.data:
-            for session in sessions.data:
-                url = session.get("audio_storage_url", "")
-                if "audio-recordings/" in url:
-                    file_path = url.split("audio-recordings/")[-1]
-                    file_paths.append(file_path)
+    if storage_paths:
+        supabase.storage.from_("audio-recordings").remove(sorted(set(storage_paths)))
 
-        if file_paths:
-            supabase.storage.from_("audio-recordings").remove(file_paths)
-
-        # 3. Delete respondent record (CASCADE automatically purges fatigue_session rows)
-        supabase.table("respondents").delete().eq("respondent_id", respondent_id).execute()
-        return True
-    except Exception as e:
-        st.error(f"Failed to purge data for participant {respondent_id}: {e}")
-        return False
+    (
+        supabase.table("fatigue_session")
+        .delete()
+        .eq("respondent_id", respondent_id)
+        .execute()
+    )
+    (
+        supabase.table("respondents")
+        .delete()
+        .eq("respondent_id", respondent_id)
+        .execute()
+    )
 
 
 def purge_session_state(session_state, destination_step: int = 0):
@@ -154,12 +141,7 @@ def purge_session_state(session_state, destination_step: int = 0):
     )
 
     for key in list(session_state):
-        if (
-            isinstance(key, str)
-            and session_id
-            and session_id in key
-            and key.startswith(session_key_prefixes)
-        ):
+        if isinstance(key, str) and session_id and session_id in key and key.startswith(session_key_prefixes):
             del session_state[key]
 
     session_state["task_recordings"] = {}
