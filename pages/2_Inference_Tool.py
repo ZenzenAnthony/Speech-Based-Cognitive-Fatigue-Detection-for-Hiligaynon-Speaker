@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -39,6 +41,32 @@ CLASS_DETAILS = [
         "description": "Pronounced mental exhaustion, difficulty concentrating.",
     },
 ]
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = Path(os.environ.get("FATIGUE_MODEL_PATH", "fatigue_cnn_attention.keras"))
+if not MODEL_PATH.is_absolute():
+    MODEL_PATH = PROJECT_ROOT / MODEL_PATH
+
+
+@st.cache_resource(show_spinner="Loading fatigue detection model...")
+def load_inference_model(model_path: str):
+    import tensorflow as tf
+
+    from src.model_architecture import TemporalAttention, get_inference_model
+
+    custom_objects = {
+        "TemporalAttention": TemporalAttention,
+        "CustomLayers>TemporalAttention": TemporalAttention,
+    }
+    trained_model = tf.keras.models.load_model(
+        model_path,
+        custom_objects=custom_objects,
+        compile=False,
+    )
+    if len(trained_model.outputs) == 2:
+        return trained_model
+    return get_inference_model(trained_model)
+
 
 st.markdown(
     """
@@ -89,36 +117,35 @@ st.markdown(
 st.title("Researcher Diagnostic Studio")
 st.caption("Audio review, Mel-spectrogram analysis, attention diagnostics, and logged sessions")
 
-MODEL_PATH = "fatigue_cnn_attention.keras"
-STATUS_CLASSES = ["status-low", "status-moderate", "status-high"]
 
-@st.cache_resource
-def load_fatigue_model():
-    """Dynamically loads the trained model if present; returns None if not yet trained."""
-    if tf is None or not os.path.exists(MODEL_PATH):
-        return None
-    try:
-        custom_objects = {
-            "TemporalAttention": TemporalAttention,
-            "CustomLayers>TemporalAttention": TemporalAttention,
-        } if TemporalAttention else {}
+def summarize_mel_spectrogram(mel_array: np.ndarray):
+    """Extract objective spectrogram statistics for the currently uploaded clip."""
+    if mel_array is None or mel_array.size == 0:
+        return {
+            "peak_db": 0.0,
+            "mean_db": 0.0,
+            "low_freq_mean_db": 0.0,
+            "high_freq_mean_db": 0.0,
+            "quiet_frame_pct": 0.0,
+            "quiet_threshold_db": 0.0,
+        }
 
-        loaded_model = tf.keras.models.load_model(
-            MODEL_PATH,
-            custom_objects=custom_objects,
-            compile=False,
-        )
+    frame_energy = mel_array.mean(axis=0)
+    quiet_threshold = float(np.quantile(frame_energy, 0.15))
+    quiet_frames = frame_energy <= quiet_threshold
+    lower_rows = mel_array[:40, :]
+    upper_rows = mel_array[40:, :]
 
-        # If the file is already a dual-output model (fatigue_output + attention), use it directly
-        if len(loaded_model.outputs) == 2 or get_inference_model is None:
-            return loaded_model
+    return {
+        "peak_db": float(np.max(mel_array)),
+        "mean_db": float(np.mean(mel_array)),
+        "low_freq_mean_db": float(np.mean(lower_rows)),
+        "high_freq_mean_db": float(np.mean(upper_rows)),
+        "quiet_frame_pct": float(np.mean(quiet_frames) * 100.0),
+        "quiet_threshold_db": float(quiet_threshold),
+    }
 
-        # Otherwise, wrap a single-output training checkpoint into a dual-output inference model
-        return get_inference_model(loaded_model)
-    except Exception as exc:
-        st.sidebar.error(f"Model load error: {exc}")
-        return None
-    
+
 uploaded_audio = st.file_uploader(
     "Upload recorded audio",
     type=["wav", "mp3", "m4a", "ogg"],
@@ -126,6 +153,9 @@ uploaded_audio = st.file_uploader(
 )
 
 mel_spectrogram = None
+prediction = None
+attention = None
+peak_attention_time = None
 if uploaded_audio is not None:
     st.audio(uploaded_audio)
     try:
@@ -133,18 +163,61 @@ if uploaded_audio is not None:
             mel_spectrogram = extract_mel_spectrogram(uploaded_audio)
     except Exception as exc:
         st.error(f"Audio processing failed: {exc}")
+    else:
+        if MODEL_PATH.is_file():
+            try:
+                inference_model = load_inference_model(str(MODEL_PATH))
+                model_input = prepare_model_tensor(mel_spectrogram)
+                class_probabilities, attention_weights = inference_model.predict(
+                    model_input,
+                    verbose=0,
+                )
+                class_probabilities = np.asarray(class_probabilities)
+                attention_weights = np.asarray(attention_weights)
+
+                if class_probabilities.shape != (1, 3):
+                    raise ValueError(
+                        "The model must return probabilities for Low, Moderate, and High fatigue."
+                    )
+                if (
+                    np.any(class_probabilities < 0)
+                    or np.any(class_probabilities > 1)
+                    or not np.isclose(class_probabilities.sum(), 1.0, atol=1e-3)
+                ):
+                    raise ValueError("The model returned invalid class confidence scores.")
+                if attention_weights.ndim != 2 or attention_weights.shape[0] != 1:
+                    raise ValueError("The model returned an invalid temporal attention shape.")
+                if (
+                    attention_weights.shape[1] == 0
+                    or np.any(attention_weights < 0)
+                    or not np.isclose(attention_weights.sum(), 1.0, atol=1e-3)
+                ):
+                    raise ValueError("The model returned invalid temporal attention weights.")
+                if (
+                    not np.isfinite(class_probabilities).all()
+                    or not np.isfinite(attention_weights).all()
+                ):
+                    raise ValueError("The model returned non-finite inference values.")
+
+                prediction = class_probabilities[0]
+                attention = attention_weights[0]
+                peak_attention_index = int(np.argmax(attention))
+                peak_attention_time = (
+                    (peak_attention_index + 0.5) * TARGET_DURATION / len(attention)
+                )
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                st.error(f"Model analysis failed: {exc}")
 
 left, right = st.columns([1.5, 1])
 
 with left:
-    st.markdown('<div class="card-panel">', unsafe_allow_html=True)
-    st.subheader("Audio features")
-    if uploaded_audio is None:
-        st.info("Upload an audio recording to generate its Mel-spectrogram.")
-    elif mel_spectrogram is not None:
-        st.success("Audio processed: 16 kHz mono, voice activity trimmed, and padded or clipped to 15 seconds.")
-        st.caption(f"Mel-spectrogram shape: {mel_spectrogram.shape[0]} bins × {mel_spectrogram.shape[1]} frames")
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("Audio features")
+        if uploaded_audio is None:
+            st.info("Upload an audio recording to generate its Mel-spectrogram.")
+        elif mel_spectrogram is not None:
+            st.success("Audio processed: 16 kHz mono, voice activity trimmed, and padded or clipped to 15 seconds.")
+            st.caption(f"Mel-spectrogram shape: {mel_spectrogram.shape[0]} bins × {mel_spectrogram.shape[1]} frames")
 
     if mel_spectrogram is not None:
         fig = px.imshow(
@@ -156,70 +229,47 @@ with left:
         fig.update_layout(margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-with right:
-    st.markdown('<div class="card-panel">', unsafe_allow_html=True)
-    st.subheader("Fatigue classification")
-
-    trained_model = load_fatigue_model()
-    prediction = None
-    attention = None
-
-    if trained_model is None:
-        st.info(
-            "Prediction and attention analysis are unavailable because a trained "
-            "model is not connected yet."
-        )
-    elif uploaded_audio is None:
-        st.info("Upload an audio recording to inspect fatigue predictions.")
-    elif mel_spectrogram is not None:
-        try:
-            input_tensor = prepare_model_tensor(mel_spectrogram)
-            model_output = trained_model.predict(input_tensor, verbose=0)
-
-            if isinstance(model_output, (list, tuple)):
-                class_probabilities = np.asarray(model_output[0])
-                attention_weights = (
-                    np.asarray(model_output[1]) if len(model_output) > 1 else None
-                )
-            else:
-                class_probabilities = np.asarray(model_output)
-                attention_weights = None
-
-            if class_probabilities.shape != (1, len(CLASS_DETAILS)):
-                raise ValueError(
-                    "The model must return probabilities for Low, Moderate, "
-                    "and High fatigue."
-                )
-            if (
-                not np.isfinite(class_probabilities).all()
-                or np.any(class_probabilities < 0)
-                or np.any(class_probabilities > 1)
-                or not np.isclose(class_probabilities.sum(), 1.0, atol=1e-3)
-            ):
-                raise ValueError("The model returned invalid class probabilities.")
-
-            prediction = class_probabilities[0]
-            class_idx = int(np.argmax(prediction))
-            predicted_class = CLASS_DETAILS[class_idx]
-            confidence_score = float(prediction[class_idx])
-
+        mel_stats = summarize_mel_spectrogram(mel_spectrogram)
+        with st.container(border=True):
+            st.subheader("Graph interpretation")
             st.markdown(
-                f'<div class="status-pill {STATUS_CLASSES[class_idx]}">'
-                f'{predicted_class["label"]} ({confidence_score:.1%} confidence)</div>',
-                unsafe_allow_html=True,
+                f"**Peak dB:** {mel_stats['peak_db']:.2f} dB  |  "
+                f"**Mean dB:** {mel_stats['mean_db']:.2f} dB"
             )
-            st.metric("Predicted fatigue level", predicted_class["label"])
-            st.metric("Prediction confidence", f"{confidence_score:.1%}")
-            st.caption("Class probabilities")
-            for detail, probability in zip(CLASS_DETAILS, prediction):
-                st.progress(
-                    float(probability),
-                    text=f'{detail["label"]}: {probability:.1%}',
-                )
+            st.caption(
+                "Bright yellow/white regions indicate strong vocal energy and more audible phonation; "
+                "dark purple regions indicate lower energy, reduced vocal intensity, or pauses/silence."
+            )
+            st.markdown(
+                f"**Lower Mel bins (rows 1–40):** mean {mel_stats['low_freq_mean_db']:.2f} dB — these bins emphasize the lower vocal spectrum and the fundamental pitch region (F0 / base vocal tone).\n\n"
+                f"**Upper Mel bins (rows 41–128):** mean {mel_stats['high_freq_mean_db']:.2f} dB — these bins capture upper harmonics, breathier texture, and higher resonance energy."
+            )
+            st.markdown(
+                f"**Silent / low-energy frames:** {mel_stats['quiet_frame_pct']:.1f}% of the 1,500 time columns fall at or below the file-specific threshold of {mel_stats['quiet_threshold_db']:.2f} dB. "
+                "This approximates hesitation pauses, breath gaps, or sigh-like low-energy moments (aguy-hoy)."
+            )
 
+with right:
+    with st.container(border=True):
+        st.subheader("Fatigue classification")
+        if uploaded_audio is None:
+            st.info("Upload an audio recording to run fatigue classification.")
+        elif not MODEL_PATH.is_file():
+            st.warning(
+                "A trained model is not available. Add "
+                "`fatigue_cnn_attention.keras` to the project root or set "
+                "`FATIGUE_MODEL_PATH` to the model file to enable classification, "
+                "confidence scores, and temporal attention."
+            )
+        elif prediction is not None:
+            predicted_index = int(np.argmax(prediction))
+            predicted_class = CLASS_DETAILS[predicted_index]
+            st.metric("Predicted fatigue level", predicted_class["label"])
+            st.metric("Prediction confidence", f"{prediction[predicted_index]:.1%}")
+            st.caption("Interactive class probabilities (hover over a bar for the exact score)")
             confidence_df = pd.DataFrame(
                 {
-                    "Fatigue level": [detail["label"] for detail in CLASS_DETAILS],
+                    "Fatigue level": [item["label"] for item in CLASS_DETAILS],
                     "Probability": prediction,
                 }
             )
@@ -232,7 +282,7 @@ with right:
                 color_discrete_sequence=["#10B981", "#F59E0B", "#EF4444"],
                 category_orders={
                     "Fatigue level": [
-                        detail["label"] for detail in reversed(CLASS_DETAILS)
+                        item["label"] for item in reversed(CLASS_DETAILS)
                     ]
                 },
                 text=confidence_df["Probability"].map(lambda value: f"{value:.1%}"),
@@ -250,22 +300,130 @@ with right:
             )
             st.plotly_chart(confidence_fig, use_container_width=True)
 
-            if attention_weights is not None:
-                if (
-                    attention_weights.ndim != 2
-                    or attention_weights.shape[0] != 1
-                    or attention_weights.shape[1] == 0
-                    or not np.isfinite(attention_weights).all()
-                    or np.any(attention_weights < 0)
-                    or not np.isclose(attention_weights.sum(), 1.0, atol=1e-3)
-                ):
-                    raise ValueError("The model returned invalid temporal attention weights.")
-                attention = attention_weights[0]
+            sorted_probs = np.sort(prediction)[::-1]
+            top_gap = float(sorted_probs[0] - sorted_probs[1])
+            if top_gap <= 0.15:
+                st.warning(
+                    "Borderline / transitional classification: the top two fatigue probabilities are within 15% of each other "
+                    f"(gap = {top_gap:.2%}), so this sample may sit near a decision boundary between classes."
+                )
+            else:
+                st.success(
+                    f"Decision confidence gap: {top_gap:.2%} between the top two classes; the prediction is relatively stable."
+                )
 
-        except Exception as exc:
-            st.error(f"Inference error: {exc}")
+            recommendation_map = {
+                "Low Fatigue": {
+                    "kind": "info",
+                    "title": "Low fatigue: maintain steady performance",
+                    "body": "Keep your pacing stable and continue current task flow, but use brief hydration and micro-recovery breaks every 25–40 minutes to protect attention quality.",
+                },
+                "Moderate Fatigue": {
+                    "kind": "warning",
+                    "title": "Moderate fatigue: reduce cognitive load",
+                    "body": "Break the next task into smaller steps, reduce screen-heavy work, and use a 3–5 minute structured pause every 15–20 minutes. Simple breathing, standing movement, and brief task switching can help restore alertness.",
+                },
+                "High Fatigue": {
+                    "kind": "error",
+                    "title": "High fatigue: prioritize rest and support",
+                    "body": "Pause demanding tasks immediately, rest in a quiet environment, and consider professional guidance if this pattern persists. Persistent high fatigue is a signal to reduce workload and seek support from a guidance counselor or qualified clinician.",
+                },
+            }
+            recommendation = recommendation_map.get(predicted_class["label"], recommendation_map["Moderate Fatigue"])
+            if recommendation["kind"] == "info":
+                st.info(f"**{recommendation['title']}**\n\n{recommendation['body']}")
+            elif recommendation["kind"] == "warning":
+                st.warning(f"**{recommendation['title']}**\n\n{recommendation['body']}")
+            else:
+                st.error(f"**{recommendation['title']}**\n\n{recommendation['body']}")
+            st.caption(
+                "This output is a speech-based acoustic screening result only and is not a clinical or medical diagnosis. "
+                "It may help researchers or supervisors notice a possible fatigue trend, but formal diagnosis should use clinical assessment and context."
+            )
 
-    st.markdown('</div>', unsafe_allow_html=True)
+if prediction is not None:
+    with st.container(border=True):
+        st.subheader("Fatigue scale reference")
+        detail_columns = st.columns(3)
+        for column, detail in zip(detail_columns, CLASS_DETAILS):
+            with column:
+                with st.container(border=True):
+                    st.markdown(f"**{detail['label']}**")
+                    st.caption(detail["hiligaynon"])
+                    st.markdown(f"`{detail['scale']}`")
+                    st.caption(detail["description"])
+
+if attention is not None:
+    with st.container(border=True):
+        st.subheader("Temporal attention")
+        peak_attention_weight = float(np.max(attention))
+        st.metric(
+            "Peak attention timestamp",
+            f"{peak_attention_time:.3f} s",
+            help="Center timestamp of the model attention bin with the highest relative weight.",
+        )
+        st.markdown(
+            f"**Peak attention weight:** {peak_attention_weight:.4f}  |  **Exact focus time:** {peak_attention_time:.3f} s of the 15.0 s window"
+        )
+        st.caption(
+            "The neural network prioritized this specific second because it contains the strongest relative acoustic pattern in the input sequence, "
+            "which usually corresponds to the most informative vocal segment for the fatigue decision."
+        )
+        attention_times = (
+            np.arange(len(attention), dtype=np.float32) + 0.5
+        ) * TARGET_DURATION / len(attention)
+        attention_df = pd.DataFrame(
+            {"Time (seconds)": attention_times, "Attention weight": attention}
+        )
+        attention_fig = px.area(
+            attention_df,
+            x="Time (seconds)",
+            y="Attention weight",
+            labels={"Attention weight": "Relative importance"},
+            title="Model attention across the 15-second audio window",
+        )
+        attention_fig.add_scatter(
+            x=[peak_attention_time],
+            y=[peak_attention_weight],
+            mode="markers",
+            name="Peak attention",
+            marker={"color": "#DC2626", "size": 10, "symbol": "diamond"},
+            hovertemplate=(
+                f"Peak attention: {peak_attention_time:.3f} s"
+                "<br>Relative weight: %{y:.4f}<extra></extra>"
+            ),
+        )
+        attention_fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(attention_fig, use_container_width=True)
+        st.caption(
+            "The timestamp marks the center of the highest-weight attention bin. "
+            "Attention weights show relative model focus, not calibrated confidence "
+            "or clinical proof that fatigue markers occurred at that instant."
+        )
+
+with st.expander("Researcher interpretation guide"):
+    st.markdown(
+        """
+        **Mel-spectrogram (128 Mel bins):** The vertical axis groups acoustic
+        energy into 128 perceptually spaced frequency bands; the horizontal axis
+        represents time across the standardized 15-second clip. Brighter or
+        higher-energy regions indicate stronger signal energy in those bands.
+        This view is a model input representation, not a transcript or a direct
+        measurement of fatigue.
+
+        **Temporal attention:** The curve shows how the model distributes its
+        relative attention across time steps while forming its prediction. The
+        peak timestamp is the center of the bin with the largest attention
+        weight. Attention is model-relative and should not be interpreted as a
+        calibrated confidence score, causal explanation, or clinically validated
+        localization of fatigue.
+
+        **Class probabilities:** The three bars show the model's output
+        probabilities for the Low, Moderate, and High classes. They are model
+        scores, not a diagnosis. The Samn–Perelli ranges shown in the reference
+        cards explain the study's class mapping.
+        """
+    )
 
 if prediction is not None:
     with st.container(border=True):

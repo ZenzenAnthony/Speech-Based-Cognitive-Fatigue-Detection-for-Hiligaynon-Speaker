@@ -5,14 +5,7 @@ from urllib.request import urlopen
 
 import streamlit as st
 
-from src.audio_processor import standardize_audio
-from src.database import (
-    delete_participant_data,
-    log_session,
-    purge_session_state,
-    save_respondent,
-    upload_audio_blob,
-)
+from src.database import delete_participant_data, purge_session_state
 
 st.set_page_config(page_title="Participant Data Collection", layout="wide")
 
@@ -108,7 +101,7 @@ st.markdown(
             box-shadow: 0 0 0 1px #2563EB;
         }
         @media (max-width: 640px) {
-            .block-container { padding: 1.5rem 0.75rem 1.5rem; }
+            .block-container { padding: 0.75rem 0.75rem 1.5rem; }
             .study-banner { padding: 0.9rem; }
             .study-banner-title { font-size: 1.2rem; }
             div[data-testid="stRadio"] [role="radiogroup"] { gap: 0.25rem; }
@@ -767,23 +760,14 @@ def retry_cloud_purge():
 def purge_withdrawn_participant(destination_step):
     pending = st.session_state.get("pending_cloud_purge")
     if pending is None:
-        pending = {
-            "respondent_id": st.session_state.respondent_id,
-            "session_id": st.session_state.session_id,
-        }
+        pending = {"respondent_id": st.session_state.respondent_id}
         st.session_state.pending_cloud_purge = pending
 
     try:
-        delete_participant_data(
-            respondent_id=pending["respondent_id"],
-            session_id=pending["session_id"],
-        )
+        delete_participant_data(respondent_id=pending["respondent_id"])
     except Exception as exc:
         st.session_state.cloud_purge_error = str(exc)
-        purge_error = str(exc)
         purge_session_state(st.session_state, destination_step=destination_step)
-        st.session_state.pending_cloud_purge = pending
-        st.session_state.cloud_purge_error = purge_error
         return
 
     st.session_state.cloud_purge_error = None
@@ -830,10 +814,6 @@ def render_progress(text):
         st.error(
             "Your local session has been cleared, but cloud deletion has not yet completed. "
             "Reconnect to the database and retry the deletion below."
-        )
-    if st.session_state.get("persistence_error"):
-        st.error(
-            "Data could not be saved to the research database. Please check the connection and retry."
         )
 
 
@@ -1024,16 +1004,13 @@ def render_screening_step():
         if st.button(
             text["next"],
             type="primary",
+            on_click=submit_screening,
             width="stretch",
             disabled=(
                 not birthplace_available
                 and not st.session_state.birthplace_manual_text.strip()
             ),
-        ):
-            with st.spinner("Saving participant screening details..."):
-                submit_screening()
-            if st.session_state.current_step == 3:
-                st.rerun()
+        )
 
 
 def render_task_step():
