@@ -27,7 +27,7 @@ secrets.toml
 *.flac
 
 # Deep learning models & checkpoints
-*.keras
+# Removed keras
 *.h5
 *.tflite
 *.ckpt
@@ -37,3 +37,4 @@ secrets.toml
 .idea/
 .DS_Store
 Thumbs.db
+test_audio/

@@ -4,10 +4,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.audio_processor import TARGET_DURATION, extract_mel_spectrogram, prepare_model_tensor
 from src.database import fetch_all_sessions
+
+# Optional TensorFlow import: prevents crashes if running in a lightweight collection environment
+try:
+    import tensorflow as tf
+    from src.model_architecture import TemporalAttention, get_inference_model
+except ImportError:
+    tf = None
+    TemporalAttention = None
+    get_inference_model = None
 
 st.set_page_config(page_title="Researcher Diagnostic Studio", layout="wide")
 
@@ -384,6 +394,93 @@ if attention is not None:
             ),
         )
         attention_fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(attention_fig, use_container_width=True)
+        st.caption(
+            "The timestamp marks the center of the highest-weight attention bin. "
+            "Attention weights show relative model focus, not calibrated confidence "
+            "or clinical proof that fatigue markers occurred at that instant."
+        )
+
+with st.expander("Researcher interpretation guide"):
+    st.markdown(
+        """
+        **Mel-spectrogram (128 Mel bins):** The vertical axis groups acoustic
+        energy into 128 perceptually spaced frequency bands; the horizontal axis
+        represents time across the standardized 15-second clip. Brighter or
+        higher-energy regions indicate stronger signal energy in those bands.
+        This view is a model input representation, not a transcript or a direct
+        measurement of fatigue.
+
+        **Temporal attention:** The curve shows how the model distributes its
+        relative attention across time steps while forming its prediction. The
+        peak timestamp is the center of the bin with the largest attention
+        weight. Attention is model-relative and should not be interpreted as a
+        calibrated confidence score, causal explanation, or clinically validated
+        localization of fatigue.
+
+        **Class probabilities:** The three bars show the model's output
+        probabilities for the Low, Moderate, and High classes. They are model
+        scores, not a diagnosis. The Samn–Perelli ranges shown in the reference
+        cards explain the study's class mapping.
+        """
+    )
+
+if prediction is not None:
+    with st.container(border=True):
+        st.subheader("Fatigue scale reference")
+        detail_columns = st.columns(3)
+        for column, detail in zip(detail_columns, CLASS_DETAILS):
+            with column:
+                with st.container(border=True):
+                    st.markdown(f'**{detail["label"]}**')
+                    st.caption(detail["hiligaynon"])
+                    st.markdown(f'`{detail["scale"]}`')
+                    st.caption(detail["description"])
+
+if attention is not None:
+    with st.container(border=True):
+        st.subheader("Temporal attention")
+        peak_attention_index = int(np.argmax(attention))
+        attention_times = (
+            np.arange(len(attention), dtype=np.float32) + 0.5
+        ) * TARGET_DURATION / len(attention)
+        peak_attention_time = float(attention_times[peak_attention_index])
+        st.metric(
+            "Peak attention timestamp",
+            f"{peak_attention_time:.3f} s",
+            help="Center timestamp of the model attention bin with the highest relative weight.",
+        )
+
+        attention_fig = go.Figure()
+        attention_fig.add_trace(
+            go.Scatter(
+                x=attention_times,
+                y=attention,
+                mode="lines",
+                line={"color": "#2563EB", "width": 2},
+                fill="tozeroy",
+                name="Attention weight",
+            )
+        )
+        attention_fig.add_trace(
+            go.Scatter(
+                x=[peak_attention_time],
+                y=[attention[peak_attention_index]],
+                mode="markers",
+                name="Peak attention",
+                marker={"color": "#DC2626", "size": 10, "symbol": "diamond"},
+                hovertemplate=(
+                    f"Peak attention: {peak_attention_time:.3f} s"
+                    "<br>Relative weight: %{y:.4f}<extra></extra>"
+                ),
+            )
+        )
+        attention_fig.update_layout(
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title="Time (seconds)",
+            yaxis_title="Relative attention weight",
+            height=280,
+        )
         st.plotly_chart(attention_fig, use_container_width=True)
         st.caption(
             "The timestamp marks the center of the highest-weight attention bin. "
