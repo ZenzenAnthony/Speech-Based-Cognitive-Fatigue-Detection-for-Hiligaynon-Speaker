@@ -5,7 +5,14 @@ from urllib.request import urlopen
 
 import streamlit as st
 
-from src.database import delete_participant_data, purge_session_state
+from src.audio_processor import standardize_audio
+from src.database import (
+    delete_participant_data,
+    log_session,
+    purge_session_state,
+    save_respondent,
+    upload_audio_blob,
+)
 
 st.set_page_config(page_title="Participant Data Collection", layout="wide")
 
@@ -999,13 +1006,13 @@ def render_screening_step():
 
     previous_col, next_col = st.columns(2)
     with previous_col:
-        st.button(text["previous"], on_click=previous_step, width="stretch")
+        st.button(text["previous"], on_click=previous_step, use_container_width=True)
     with next_col:
-        if st.button(
+        st.button(
             text["next"],
             type="primary",
             on_click=submit_screening,
-            width="stretch",
+            use_container_width=True,
             disabled=(
                 not birthplace_available
                 and not st.session_state.birthplace_manual_text.strip()
@@ -1068,12 +1075,12 @@ def render_task_step():
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.button(screening["previous"], width="stretch", on_click=previous_step)
+        st.button(screening["previous"], use_container_width=True, on_click=previous_step)
     with col2:
         st.button(
             flow["next_rating"],
             type="primary",
-            width="stretch",
+            use_container_width=True,
             disabled=not st.session_state.task_recordings.get(task_level),
             on_click=open_rating_step,
         )
@@ -1104,12 +1111,12 @@ def render_rating_step():
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        st.button(screening["previous"], width="stretch", on_click=previous_step)
+        st.button(screening["previous"], use_container_width=True, on_click=previous_step)
     with col2:
         if st.button(
             flow["finish_tasks"] if st.session_state.task_index == len(TASK_LEVELS) - 1 else flow["next_task"],
             type="primary",
-            width="stretch",
+            use_container_width=True,
             disabled=rating is None,
         ):
             if st.session_state.task_index == len(TASK_LEVELS) - 1:
